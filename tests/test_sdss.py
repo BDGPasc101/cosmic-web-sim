@@ -131,6 +131,46 @@ def test_offline_fallback_is_deterministic_and_does_not_create_cache(
     assert first["ra"].between(150, 210).all()
     assert first["dec"].between(-1.25, 1.25).all()
     assert first["z"].between(0.01, 0.12).all()
+    assert {"g", "r", "g_minus_r"}.issubset(first.columns)
+    assert np.allclose(first["g_minus_r"], first["g"] - first["r"])
+    assert first["g_minus_r"].between(0.45, 0.85).all()
+
+
+def test_legacy_cache_refreshes_and_derives_color_from_local_density(
+    tmp_path, monkeypatch
+) -> None:
+    rng = np.random.default_rng(4)
+    dense_cluster = pd.DataFrame(
+        {
+            "ra": rng.normal(180.0, 0.03, 24),
+            "dec": rng.normal(0.0, 0.003, 24),
+            "z": rng.normal(0.05, 0.0003, 24),
+        }
+    )
+    sparse_filament = pd.DataFrame(
+        {
+            "ra": np.linspace(150, 210, 12),
+            "dec": np.linspace(-1.0, 1.0, 12),
+            "z": np.linspace(0.02, 0.11, 12),
+        }
+    )
+    old_cache = pd.concat([dense_cluster, sparse_filament], ignore_index=True)
+    path = tmp_path / "legacy.csv"
+    old_cache.to_csv(path, index=False)
+
+    def offline(*args, **kwargs):
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr(requests, "get", offline)
+    with pytest.warns(RuntimeWarning, match="offline"):
+        catalog = fetch_sdss_wedge(cache_path=path)
+
+    assert catalog.iloc[: len(dense_cluster)]["g_minus_r"].median() > (
+        catalog.iloc[len(dense_cluster) :]["g_minus_r"].median()
+    )
+    assert catalog.iloc[: len(dense_cluster)]["g_minus_r"].median() > 0.75
+    assert catalog.iloc[len(dense_cluster) :]["g_minus_r"].median() < 0.55
+    assert list(pd.read_csv(path).columns) == ["ra", "dec", "z"]
 
 
 def test_fetch_parses_skyserver_comment_header_and_reuses_cache(
@@ -140,7 +180,7 @@ def test_fetch_parses_skyserver_comment_header_and_reuses_cache(
     calls = []
 
     class Response:
-        text = "#Table1\nra,dec,z\n180.0,0.2,0.06\n"
+        text = "#Table1\nra,dec,z,g,r\n180.0,0.2,0.06,18.1,17.5\n"
 
         def raise_for_status(self):
             pass
@@ -153,9 +193,12 @@ def test_fetch_parses_skyserver_comment_header_and_reuses_cache(
     first = fetch_sdss_wedge(cache_path=path)
     second = fetch_sdss_wedge(cache_path=path)
     pd.testing.assert_frame_equal(first, second)
+    assert first.loc[0, "g_minus_r"] == pytest.approx(0.6)
     assert len(calls) == 1
     assert calls[0][1]["format"] == "csv"
     assert "TOP 5000" in calls[0][1]["cmd"]
+    assert "FROM SpecPhoto" in calls[0][1]["cmd"]
+    assert "modelMag_g > 0 AND modelMag_r > 0" in calls[0][1]["cmd"]
     assert path.exists()
 
     def offline(*args, **kwargs):

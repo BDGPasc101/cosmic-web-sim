@@ -51,15 +51,20 @@ Install the dependencies:
 python -m pip install -r requirements.txt
 ```
 
-## Run the starter app
+## Run the interactive dashboard
 
-Start the Streamlit app from the project directory:
+Start the dark-mode dashboard from the project directory:
 
 ```bash
 streamlit run app.py
 ```
 
-The app currently shows an introduction and implementation status.
+Choose a preset or customize the cosmology and simulation resolution. The
+dashboard caches the evolution and SDSS projection so timeline scrubbing does
+not rerun the simulation. The resolution control selects a 128, 160, or 192
+square mesh with one particle per cell; particle overlays are subsampled for
+browser performance. The SDSS comparison is a 2D projection against a periodic
+simulation, not a full 3D survey analysis.
 
 ## Run tests
 
@@ -84,18 +89,25 @@ structure, SDSS projection and offline loading, and clustering estimators.
 - **Simulation:** integrate canonical momentum and comoving positions with a
   scale-factor Kick-Drift-Kick scheme, saving density and cosmic-age snapshots
   from z=50 to z=0.
-- **SDSS data:** load observed galaxy coordinates (right ascension,
-  declination, and redshift) and estimate the clustering statistic xi(r).
+- **SDSS data:** load observed galaxy coordinates and g-r photometry, project
+  the wedge with a color-coded galaxy-age proxy, and compare xi(r) with the
+  simulation.
 
 The SDSS data-analysis module remains a separate observational component.
 
 ## SDSS wedge and clustering
 
-`fetch_sdss_wedge()` downloads up to 5,000 confirmed DR17 galaxies and caches
-them in `data/sdss_slice_cache.csv`. Existing caches are used without a network
-request; pass `force_refresh=True` to retry the download. If the network fails,
-the loader warns and uses the existing cache or a deterministic mock catalog.
-Mock data are never saved as observed data.
+`fetch_sdss_wedge()` downloads up to 5,000 confirmed DR17 galaxies, including
+g/r model magnitudes, and caches them in `data/sdss_slice_cache.csv`. Existing
+photometry caches are used without a network request; pass `force_refresh=True`
+to retry the download. Older coordinate-only caches trigger a photometry
+refresh. If the network fails, fallback colors are estimated from local
+clustering density and are not written back as observed data; without a cache,
+a deterministic mock catalog is used.
+
+The SDSS wedge colors galaxies by the g-r color index: blue represents younger,
+star-forming populations while red represents older populations. The color
+index is an age proxy, not a direct measurement of stellar age.
 
 `project_sdss_to_cartesian(catalog)` returns equatorial positions in Mpc/h.
 `compute_two_point_correlation(positions, r_bins, boxsize=L)` estimates
