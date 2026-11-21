@@ -10,6 +10,7 @@ from numpy.typing import ArrayLike, NDArray
 import pandas as pd
 import requests
 from scipy.integrate import cumulative_trapezoid, quad
+from scipy.ndimage import gaussian_filter
 from scipy.spatial import cKDTree
 
 from src.cosmology import Cosmology, expansion_rate
@@ -188,6 +189,89 @@ def project_sdss_to_cartesian(
     distance = np.array([_distance(float(value), cosmology) for value in z])
     angle = np.deg2rad(ra)
     return np.column_stack((distance * np.cos(angle), distance * np.sin(angle)))
+
+
+def project_sdss_to_3d(
+    catalog: pd.DataFrame, cosmology: Cosmology = Cosmology()
+) -> NDArray[np.float64]:
+    """Project SDSS RA, declination, and redshift into (N, 3) Mpc/h positions."""
+    if not {"ra", "dec", "z"}.issubset(catalog.columns):
+        raise ValueError("catalog must contain ra, dec, and z columns")
+    ra = np.asarray(catalog["ra"], dtype=np.float64)
+    dec = np.asarray(catalog["dec"], dtype=np.float64)
+    redshift = np.asarray(catalog["z"], dtype=np.float64)
+    if (
+        not np.all(np.isfinite(ra))
+        or not np.all(np.isfinite(dec))
+        or not np.all(np.isfinite(redshift))
+        or np.any(redshift < 0.0)
+        or np.any(np.abs(dec) > 90.0)
+    ):
+        raise ValueError("RA, declination, and non-negative redshift must be finite")
+    distance = np.array(
+        [_distance(float(value), cosmology) for value in redshift],
+        dtype=np.float64,
+    )
+    ra_rad = np.deg2rad(ra)
+    dec_rad = np.deg2rad(dec)
+    cos_dec = np.cos(dec_rad)
+    return np.column_stack(
+        (
+            distance * cos_dec * np.cos(ra_rad),
+            distance * cos_dec * np.sin(ra_rad),
+            distance * np.sin(dec_rad),
+        )
+    )
+
+
+def compute_sdss_3d_density_grid(
+    X: ArrayLike,
+    Y: ArrayLike,
+    Z: ArrayLike,
+    grid_shape: tuple[int, int, int] = (48, 48, 16),
+    sigma: float = 1.2,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Return a smoothed 3D galaxy-count volume and its voxel center grids."""
+    coordinates = tuple(
+        np.asarray(values, dtype=np.float64) for values in (X, Y, Z)
+    )
+    if any(values.ndim != 1 for values in coordinates):
+        raise ValueError("X, Y, and Z must be one-dimensional arrays")
+    if (
+        len(coordinates[0]) == 0
+        or any(len(values) != len(coordinates[0]) for values in coordinates[1:])
+        or any(not np.all(np.isfinite(values)) for values in coordinates)
+    ):
+        raise ValueError("X, Y, and Z must be nonempty finite arrays of equal length")
+    if (
+        len(grid_shape) != 3
+        or any(not isinstance(size, (int, np.integer)) or size < 2 for size in grid_shape)
+    ):
+        raise ValueError("grid_shape must contain three integers of at least 2")
+    if not np.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError("sigma must be positive and finite")
+
+    points = np.column_stack(coordinates)
+    ranges: list[tuple[float, float]] = []
+    for axis in coordinates:
+        lower = float(np.min(axis))
+        upper = float(np.max(axis))
+        if lower == upper:
+            padding = max(abs(lower) * 1e-6, 0.5)
+            lower -= padding
+            upper += padding
+        ranges.append((lower, upper))
+
+    counts, edges = np.histogramdd(points, bins=grid_shape, range=ranges)
+    density = gaussian_filter(counts.astype(np.float64), sigma=float(sigma))
+    centers = [(edge[:-1] + edge[1:]) / 2.0 for edge in edges]
+    gx, gy, gz = np.meshgrid(*centers, indexing="ij")
+    return density, gx, gy, gz
 
 
 def _pair_counts(

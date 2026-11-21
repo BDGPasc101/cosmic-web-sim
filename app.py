@@ -9,9 +9,11 @@ import streamlit as st
 from src.cosmology import Cosmology
 from src.initial_conditions import generate_initial_conditions
 from src.sdss_data import (
+    compute_sdss_3d_density_grid,
     compute_two_point_correlation,
     fetch_sdss_wedge,
     project_sdss_to_cartesian,
+    project_sdss_to_3d,
 )
 from src.simulation import Simulation, SimulationSnapshot
 
@@ -87,11 +89,30 @@ def run_simulation(
 @st.cache_data(show_spinner="Loading Sloan Digital Sky Survey observations...")
 def load_sdss_data(
     omega_m: float, omega_lambda: float
-) -> tuple[pd.DataFrame, np.ndarray]:
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """Load cached or live SDSS observations and project them into the wedge."""
     catalog = fetch_sdss_wedge()
     cosmology = Cosmology(omega_m=omega_m, omega_lambda=omega_lambda)
-    return catalog, project_sdss_to_cartesian(catalog, cosmology)
+    return (
+        catalog,
+        project_sdss_to_cartesian(catalog, cosmology),
+        project_sdss_to_3d(catalog, cosmology),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _sdss_density_grid(
+    positions: np.ndarray,
+    grid_shape: tuple[int, int, int] = (48, 48, 16),
+    sigma: float = 1.2,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return compute_sdss_3d_density_grid(
+        positions[:, 0],
+        positions[:, 1],
+        positions[:, 2],
+        grid_shape=grid_shape,
+        sigma=sigma,
+    )
 
 
 def _base_zmax_from_density(density_grid: np.ndarray) -> float:
@@ -280,6 +301,91 @@ def _sdss_wedge_figure(
     return figure
 
 
+def _sdss_3d_figure(
+    positions: np.ndarray,
+    g_minus_r: np.ndarray,
+    density_grid: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+) -> go.Figure:
+    color_index = np.asarray(g_minus_r, dtype=np.float64)
+    if color_index.shape != (len(positions),) or not np.all(np.isfinite(color_index)):
+        raise ValueError("g_minus_r must contain one finite value per SDSS galaxy")
+
+    figure = go.Figure()
+    if density_grid is not None:
+        density, gx, gy, gz = density_grid
+        nonzero_density = density[density > 0.0]
+        if nonzero_density.size:
+            isomin, isomax = np.percentile(nonzero_density, [70.0, 98.0])
+            if isomax > isomin:
+                figure.add_trace(
+                    go.Isosurface(
+                        x=gx.ravel(),
+                        y=gy.ravel(),
+                        z=gz.ravel(),
+                        value=density.ravel(),
+                        isomin=float(isomin),
+                        isomax=float(isomax),
+                        surface_count=3,
+                        opacity=0.16,
+                        colorscale="inferno",
+                        caps={"x_show": False, "y_show": False, "z_show": False},
+                        showscale=False,
+                        name="Filament density",
+                    )
+                )
+    figure.add_trace(
+        go.Scatter3d(
+            x=positions[:, 0],
+            y=positions[:, 1],
+            z=positions[:, 2],
+            mode="markers",
+            marker={
+                "size": 2.5,
+                "color": color_index,
+                "colorscale": ["#38BDF8", "#F8FAFC", "#F97316", "#EF4444"],
+                "cmin": 0.35,
+                "cmax": 0.95,
+                "opacity": 0.85,
+                "colorbar": {
+                    "title": "Galaxy Age (g - r Color)",
+                    "tickvals": [0.4, 0.65, 0.9],
+                    "ticktext": ["Younger (Blue)", "Middle-Aged", "Older (Red)"],
+                },
+            },
+            hovertemplate=(
+                "X=%{x:.1f} Mpc/h<br>Y=%{y:.1f} Mpc/h"
+                "<br>Z=%{z:.1f} Mpc/h"
+                "<br>g - r=%{marker.color:.2f}<extra></extra>"
+            ),
+            name="SDSS galaxies",
+        )
+    )
+    axis_style = {
+        "showgrid": True,
+        "gridcolor": "#25293A",
+        "zeroline": False,
+        "showbackground": False,
+        "color": "#AEB4C4",
+    }
+    figure.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#05050A",
+        plot_bgcolor="#05050A",
+        height=600,
+        margin={"l": 0, "r": 0, "t": 35, "b": 0},
+        title="Rotatable 3D SDSS cosmic web",
+        scene={
+            "aspectmode": "data",
+            "bgcolor": "#05050A",
+            "xaxis": {**axis_style, "title": "X (Mpc/h)"},
+            "yaxis": {**axis_style, "title": "Y (Mpc/h)"},
+            "zaxis": {**axis_style, "title": "Z (Mpc/h)"},
+        },
+        showlegend=False,
+    )
+    return figure
+
+
 def _clustering_figure(
     simulation_positions: np.ndarray,
     sdss_positions: np.ndarray,
@@ -436,7 +542,7 @@ def main() -> None:
             omega_m=float(st.session_state["omega_m"]),
             omega_lambda=float(st.session_state["omega_lambda"]),
         )
-        catalog, sdss_positions = load_sdss_data(
+        catalog, sdss_positions, sdss_3d_positions = load_sdss_data(
             cosmology.omega_m, cosmology.omega_lambda
         )
         today = snapshots[-1]
@@ -455,21 +561,43 @@ def main() -> None:
             )
         with sdss_col:
             st.subheader("Observed galaxy wedge")
+            sdss_view = st.radio(
+                "SDSS View",
+                ["2D Sky Wedge", "3D Rotational Web"],
+                horizontal=True,
+                key="sdss_view",
+            )
+            color_index = catalog["g_minus_r"].to_numpy(dtype=np.float64)
+            if sdss_view == "3D Rotational Web":
+                show_density = st.checkbox(
+                    "Show Filament Density Cloud",
+                    value=True,
+                    key="show_sdss_density_cloud",
+                )
+                density_grid = (
+                    _sdss_density_grid(sdss_3d_positions) if show_density else None
+                )
+                sdss_figure = _sdss_3d_figure(
+                    sdss_3d_positions, color_index, density_grid
+                )
+            else:
+                sdss_figure = _sdss_wedge_figure(sdss_positions, color_index)
             st.plotly_chart(
-                _sdss_wedge_figure(
-                    sdss_positions,
-                    catalog["g_minus_r"].to_numpy(dtype=np.float64),
-                ),
+                sdss_figure,
                 key="comparison-sdss-wedge",
                 use_container_width=True,
                 config={"displayModeBar": False},
             )
             st.caption(
                 "Dense web intersections tend to hold ancient red galaxies, "
-                "while younger, blue star-forming galaxies are more common "
-                "along thinner strands. This is a 2D RA–redshift projection; "
-                "declination and the full survey angular mask are not represented."
+                "while younger, blue star-forming galaxies are more common along "
+                "thinner strands."
             )
+            if sdss_view == "2D Sky Wedge":
+                st.caption(
+                    "2D RA–redshift projection; declination and the full survey "
+                    "angular mask are not represented."
+                )
 
         st.subheader("The Clumpiness Ruler · two-point correlation ξ(r)")
         st.plotly_chart(

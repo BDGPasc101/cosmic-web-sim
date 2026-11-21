@@ -8,9 +8,11 @@ from scipy.spatial.distance import cdist, pdist
 
 from src.cosmology import Cosmology
 from src.sdss_data import (
+    compute_sdss_3d_density_grid,
     compute_two_point_correlation,
     fetch_sdss_wedge,
     project_sdss_to_cartesian,
+    project_sdss_to_3d,
 )
 
 
@@ -22,6 +24,53 @@ def test_projection_distance_increases_and_has_expected_units() -> None:
     assert np.all(np.diff(radii) > 0)
     assert radii[0] == pytest.approx(29.91, abs=0.1)
     assert np.allclose(xy, project_sdss_to_cartesian(catalog, Cosmology(h=0.9)))
+
+
+def test_3d_projection_preserves_comoving_radial_distance() -> None:
+    catalog = pd.DataFrame(
+        {
+            "ra": [150.0, 180.0, 210.0],
+            "dec": [-1.25, 0.0, 1.25],
+            "z": [0.01, 0.06, 0.12],
+        }
+    )
+    positions_3d = project_sdss_to_3d(catalog)
+    positions_2d = project_sdss_to_cartesian(catalog)
+
+    assert positions_3d.shape == (3, 3)
+    assert np.allclose(
+        np.linalg.norm(positions_3d, axis=1),
+        np.linalg.norm(positions_2d, axis=1),
+    )
+    assert positions_3d[0, 2] < 0.0
+    assert positions_3d[2, 2] > 0.0
+
+
+def test_3d_density_grid_is_smoothed_and_returns_voxel_meshes() -> None:
+    positions = np.array(
+        [
+            [-2.0, -1.0, -0.5],
+            [-1.8, -0.9, -0.4],
+            [0.2, 0.1, 0.0],
+            [1.5, 0.8, 0.4],
+            [1.7, 0.9, 0.5],
+        ]
+    )
+    density, gx, gy, gz = compute_sdss_3d_density_grid(
+        positions[:, 0],
+        positions[:, 1],
+        positions[:, 2],
+        grid_shape=(12, 10, 8),
+        sigma=0.8,
+    )
+
+    assert density.shape == (12, 10, 8)
+    assert gx.shape == gy.shape == gz.shape == density.shape
+    assert np.all(np.isfinite(density))
+    assert np.count_nonzero(density) > len(positions)
+    assert np.all(np.diff(gx[:, 0, 0]) > 0)
+    assert np.all(np.diff(gy[0, :, 0]) > 0)
+    assert np.all(np.diff(gz[0, 0, :]) > 0)
 
 
 def test_periodic_uniform_and_clustered_particles() -> None:

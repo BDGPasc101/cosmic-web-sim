@@ -110,6 +110,9 @@ star-forming populations while red represents older populations. The color
 index is an age proxy, not a direct measurement of stellar age.
 
 `project_sdss_to_cartesian(catalog)` returns equatorial positions in Mpc/h.
+The Reality Check tab also offers a rotatable 3D view that uses right
+ascension, declination, and redshift, with an optional smoothed filament-density
+volume and g-r colored galaxy markers.
 `compute_two_point_correlation(positions, r_bins, boxsize=L)` estimates
 periodic-box clustering for bin edges no larger than L/2. Omitting `boxsize`
 uses the SDSS wedge and a seeded Landy-Szalay estimator: random points have
