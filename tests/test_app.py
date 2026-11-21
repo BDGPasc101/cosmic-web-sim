@@ -3,13 +3,60 @@
 import numpy as np
 import plotly.graph_objects as go
 
+import app
 from app import (
     _base_zmax_from_density,
+    _halo_mass_function_figure,
     _heatmap,
     _sdss_3d_figure,
     _sdss_wedge_figure,
+    get_cosmic_era_caption,
 )
 from src.simulation import SimulationSnapshot
+
+
+def test_cosmic_era_captions_follow_snapshot_redshift() -> None:
+    assert get_cosmic_era_caption(30.0, 0.1)[0] == "The Cosmic Dark Ages"
+    assert get_cosmic_era_caption(5.0, 1.2) == (
+        "Building the Cosmic Web",
+        "Matter drains out of empty voids into a vast network of glowing "
+        "filaments, feeding rapid galaxy growth along cosmic highways.",
+    )
+    assert get_cosmic_era_caption(0.0, 13.8)[0] == "The Modern Cosmic Web"
+
+
+def test_app_import_does_not_start_playback() -> None:
+    assert app.st.session_state.get("is_playing", False) is False
+
+
+def test_playback_callbacks_and_deferred_timeline_advance(monkeypatch) -> None:
+    state = {
+        "timeline_index": app.SNAPSHOT_COUNT - 1,
+        "is_playing": False,
+    }
+    monkeypatch.setattr(app.st, "session_state", state)
+
+    app._toggle_playback()
+    assert state["timeline_index"] == 0
+    assert state["is_playing"] is True
+
+    app._toggle_playback()
+    assert state["is_playing"] is False
+
+    state["advance_timeline"] = True
+    app._advance_timeline_if_requested()
+    assert state["timeline_index"] == 1
+    assert "advance_timeline" not in state
+    app._advance_timeline_if_requested()
+    assert state["timeline_index"] == 1
+
+    app._restart_playback()
+    assert state["timeline_index"] == 0
+    assert state["is_playing"] is False
+
+    state["is_playing"] = True
+    app._pause_playback()
+    assert state["is_playing"] is False
 
 
 def test_base_density_scale_uses_99_5th_percentile_with_safe_floor() -> None:
@@ -63,6 +110,46 @@ def test_heatmap_uses_fixed_physical_density_limits_and_ticks() -> None:
         "2×",
         "4×",
     ]
+
+
+def test_heatmap_adds_cluster_rings_and_hover_markers() -> None:
+    snapshot = SimulationSnapshot(
+        redshift=0.0,
+        scale_factor=1.0,
+        positions=np.empty((0, 2)),
+        momenta=np.empty((0, 2)),
+        density_grid=np.zeros((8, 8)),
+        cosmic_age_gyr=13.8,
+    )
+    halo = {
+        "mass_1e12_msun": 25.0,
+        "x_mpc": 50.0,
+        "y_mpc": 50.0,
+        "radius_mpc": 10.0,
+        "peak_delta": 8.0,
+    }
+
+    figure = _heatmap(snapshot, False, 1.0, 1.35, halos=[halo])
+
+    assert len(figure.data) == 3
+    assert figure.data[1].mode == "lines"
+    assert figure.data[1].line.color == "#38BDF8"
+    assert figure.data[2].mode == "markers"
+    assert np.array_equal(figure.data[2].customdata, [[25.0, 8.0]])
+
+
+def test_halo_mass_function_chart_uses_log_axes_and_reference_series() -> None:
+    active_halos = [{"mass_1e12_msun": mass} for mass in (1.0, 5.0, 30.0)]
+    reference_halos = [
+        {"mass_1e12_msun": mass} for mass in (2.0, 10.0, 100.0)
+    ]
+
+    figure = _halo_mass_function_figure(active_halos, reference_halos)
+
+    assert figure.layout.xaxis.type == "log"
+    assert figure.layout.yaxis.type == "log"
+    assert figure.data[0].line.color == "#F59E0B"
+    assert figure.data[1].name == "Standard ΛCDM (z = 0)"
 
 
 def test_sdss_wedge_colors_markers_by_g_minus_r() -> None:

@@ -1,5 +1,7 @@
 """Interactive Streamlit dashboard for the 2D Cosmic Web Simulator."""
 
+import time
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,6 +9,7 @@ import plotly.io as pio
 import streamlit as st
 
 from src.cosmology import Cosmology
+from src.halos import compute_halo_mass_function, find_halos
 from src.initial_conditions import generate_initial_conditions
 from src.sdss_data import (
     compute_sdss_3d_density_grid,
@@ -58,6 +61,66 @@ SCENARIOS = {
         "description": "Set the matter and dark-energy densities yourself.",
     },
 }
+
+
+def get_cosmic_era_caption(redshift: float, age_gyr: float) -> tuple[str, str]:
+    """Describe the cosmic era represented by the active snapshot."""
+    if redshift > 20:
+        return (
+            "The Cosmic Dark Ages",
+            "Space is a dark, nearly smooth fog of dark matter and hydrogen gas—"
+            "no stars or galaxies exist yet, only faint quantum ripples beginning "
+            "to pull matter inward.",
+        )
+    if redshift > 10:
+        return (
+            "Cosmic Dawn — First Stars Ignite",
+            "Gravity squeezes the densest gas pockets along early web threads, "
+            "sparking the universe's very first stars and baby galaxies.",
+        )
+    if redshift > 2:
+        return (
+            "Building the Cosmic Web",
+            "Matter drains out of empty voids into a vast network of glowing "
+            "filaments, feeding rapid galaxy growth along cosmic highways.",
+        )
+    if redshift > 0.7:
+        return (
+            "Cosmic Noon — Peak Galaxy Assembly",
+            "Star birth reaches its all-time peak as filaments funnel gas into "
+            "crowded intersections, lighting up bright orange proto-clusters.",
+        )
+    return (
+        "The Modern Cosmic Web",
+        "Dark energy accelerates the expansion of space, stretching the voids "
+        "pitch-black while massive white-gold galaxy clusters shine at the "
+        "web's knots.",
+    )
+
+
+def _toggle_playback() -> None:
+    if st.session_state["is_playing"]:
+        st.session_state["is_playing"] = False
+        return
+    if st.session_state["timeline_index"] == SNAPSHOT_COUNT - 1:
+        st.session_state["timeline_index"] = 0
+    st.session_state["is_playing"] = True
+
+
+def _restart_playback() -> None:
+    st.session_state["is_playing"] = False
+    st.session_state["timeline_index"] = 0
+
+
+def _pause_playback() -> None:
+    st.session_state["is_playing"] = False
+
+
+def _advance_timeline_if_requested() -> None:
+    if st.session_state.pop("advance_timeline", False):
+        st.session_state["timeline_index"] = (
+            st.session_state.get("timeline_index", 0) + 1
+        )
 
 
 @st.cache_data(show_spinner="Simulating 13.8 billion years of gravity...")
@@ -118,6 +181,13 @@ def _sdss_density_grid(
 def _base_zmax_from_density(density_grid: np.ndarray) -> float:
     log_density = np.log10(np.maximum(1.0 + density_grid, 0.1))
     return max(float(np.percentile(log_density, 99.5)), 0.4)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_halos(
+    density_grid: np.ndarray, omega_m: float
+) -> list[dict[str, float]]:
+    return find_halos(density_grid, BOX_SIZE, omega_m=omega_m)
 
 
 @st.cache_data(show_spinner="Calibrating the physical density scale...")
@@ -189,6 +259,7 @@ def _heatmap(
     overlay_particles: bool,
     contrast: float,
     base_zmax: float,
+    halos: list[dict[str, float]] | None = None,
 ) -> go.Figure:
     grid_size = snapshot.density_grid.shape[0]
     log_density = np.log10(np.maximum(1.0 + snapshot.density_grid.T, 0.1))
@@ -231,6 +302,58 @@ def _heatmap(
                 name="Dark matter particles",
             )
         )
+    if halos:
+        grid_scale = grid_size / BOX_SIZE
+        angles = np.linspace(0.0, 2.0 * np.pi, 49)
+        ring_x: list[float | None] = []
+        ring_y: list[float | None] = []
+        for halo in halos[:15]:
+            center_x = halo["x_mpc"] * grid_scale
+            center_y = halo["y_mpc"] * grid_scale
+            radius = halo["radius_mpc"] * grid_scale
+            ring_x.extend((center_x + radius * np.cos(angles)).tolist())
+            ring_x.append(None)
+            ring_y.extend((center_y + radius * np.sin(angles)).tolist())
+            ring_y.append(None)
+        figure.add_trace(
+            go.Scatter(
+                x=ring_x,
+                y=ring_y,
+                mode="lines",
+                line={"color": "#38BDF8", "width": 1.4, "dash": "dash"},
+                opacity=0.8,
+                hoverinfo="skip",
+                showlegend=False,
+                name="Detected cluster boundaries",
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    halo["x_mpc"] * grid_scale
+                    for halo in halos[:15]
+                ],
+                y=[
+                    halo["y_mpc"] * grid_scale
+                    for halo in halos[:15]
+                ],
+                mode="markers",
+                marker={
+                    "size": 6,
+                    "color": "#E0F2FE",
+                    "line": {"color": "#38BDF8", "width": 1},
+                },
+                customdata=[
+                    [halo["mass_1e12_msun"], halo["peak_delta"]]
+                    for halo in halos[:15]
+                ],
+                hovertemplate=(
+                    "Mass: %{customdata[0]:.2f} × 10¹² M☉"
+                    "<br>Peak δ: %{customdata[1]:.2f}<extra></extra>"
+                ),
+                name="Detected clusters",
+            )
+        )
     figure.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -246,6 +369,47 @@ def _heatmap(
             "scaleanchor": "y",
             "scaleratio": 1,
         },
+    )
+    return figure
+
+
+def _halo_mass_function_figure(
+    halos: list[dict[str, float]],
+    reference_halos: list[dict[str, float]],
+) -> go.Figure:
+    mass, count = compute_halo_mass_function(halos)
+    reference_mass, reference_count = compute_halo_mass_function(reference_halos)
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=mass[count > 0],
+            y=count[count > 0],
+            mode="lines+markers",
+            line={"color": "#F59E0B", "width": 2.5},
+            marker={"color": "#FBBF24", "size": 6},
+            name="Active snapshot",
+            hovertemplate="M = %{x:.2f} × 10¹² M☉<br>N(>M) = %{y}<extra></extra>",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=reference_mass[reference_count > 0],
+            y=reference_count[reference_count > 0],
+            mode="lines",
+            line={"color": "#64748B", "width": 1.5, "dash": "dash"},
+            name="Standard ΛCDM (z = 0)",
+            hovertemplate="M = %{x:.2f} × 10¹² M☉<br>N(>M) = %{y}<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        height=300,
+        margin={"l": 12, "r": 12, "t": 18, "b": 12},
+        xaxis={"title": "Halo Mass (10¹² M☉)", "type": "log"},
+        yaxis={"title": "Cumulative N(>M)", "type": "log"},
+        legend={"orientation": "h", "y": 1.12},
     )
     return figure
 
@@ -430,6 +594,9 @@ def main() -> None:
     st.set_page_config(
         page_title="Cosmic Web Simulator", page_icon="🌌", layout="wide"
     )
+    st.session_state.setdefault("timeline_index", SNAPSHOT_COUNT - 1)
+    st.session_state.setdefault("is_playing", False)
+    _advance_timeline_if_requested()
     _configure_theme()
 
     st.session_state.setdefault(
@@ -492,26 +659,58 @@ def main() -> None:
         bool(st.session_state["dark_matter"]),
         resolution,
     )
+    st.session_state["timeline_index"] = min(
+        max(st.session_state["timeline_index"], 0), len(snapshots) - 1
+    )
+    st.session_state.setdefault("playback_speed", "1×")
     base_zmax = _calibrate_base_zmax(resolution)
     evolution_tab, reality_tab = st.tabs(
         ["🌌 Evolving the Cosmic Web", "🔭 Reality Check: Real SDSS Telescope Data"]
     )
 
     with evolution_tab:
+        playback_col, restart_col, speed_col = st.columns([1.2, 1.1, 1.2])
+        playback_col.button(
+            "⏸ Pause" if st.session_state["is_playing"] else "▶ Play",
+            on_click=_toggle_playback,
+            type="primary",
+            use_container_width=True,
+        )
+        restart_col.button(
+            "⏮ Restart",
+            on_click=_restart_playback,
+            use_container_width=True,
+        )
+        speed_col.selectbox(
+            "Speed",
+            ["1×", "2×", "0.5×"],
+            key="playback_speed",
+            label_visibility="collapsed",
+        )
         timeline_col, timeline_value_col = st.columns([4, 1])
         with timeline_col:
             snapshot_index = st.slider(
                 "Cosmic Time Scrubber · early universe → today",
                 min_value=0,
                 max_value=len(snapshots) - 1,
-                value=len(snapshots) - 1,
                 key="timeline_index",
+                on_change=_pause_playback,
             )
         snapshot = snapshots[snapshot_index]
+        active_halos = _cached_halos(
+            snapshot.density_grid, float(st.session_state["omega_m"])
+        )
+        standard_today = run_simulation(0.31, 0.69, True, resolution)[-1]
+        reference_halos = _cached_halos(standard_today.density_grid, 0.31)
         with timeline_value_col:
             st.caption(f"Selected epoch\n\nz = {snapshot.redshift:.2f}")
 
-        metric_columns = st.columns(4)
+        largest_mass = (
+            f"{active_halos[0]['mass_1e12_msun']:.1f} × 10¹² M☉"
+            if active_halos
+            else "—"
+        )
+        metric_columns = st.columns(6)
         metric_columns[0].metric(
             "Cosmic Age (Billion Years)", f"{snapshot.cosmic_age_gyr:.2f}"
         )
@@ -520,22 +719,82 @@ def main() -> None:
         metric_columns[3].metric(
             "Peak Clumpiness (max δ)", f"{np.max(snapshot.density_grid):.2f}"
         )
+        metric_columns[4].metric("Detected Clusters", f"{len(active_halos):,}")
+        metric_columns[5].metric("Largest Cluster", largest_mass)
 
-        overlay_col, contrast_col = st.columns([1, 3])
+        era_title, era_description = get_cosmic_era_caption(
+            snapshot.redshift, snapshot.cosmic_age_gyr
+        )
+        st.markdown(
+            f"""
+            <div style="
+                margin: 1.1rem 0;
+                padding: 1rem 1.25rem;
+                background: linear-gradient(110deg, #101324, #090b15);
+                border: 1px solid #554b82;
+                border-radius: 0.8rem;
+                box-shadow: 0 0 18px rgba(139, 92, 246, 0.12);
+            ">
+                <div style="color: #c4b5fd; font-size: 0.8rem;
+                    font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;">
+                    {era_title}
+                </div>
+                <div style="color: #e8eaf2; margin-top: 0.35rem;
+                    line-height: 1.55;">
+                    {era_description}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        overlay_col, contrast_col = st.columns([1.3, 2.7])
         with overlay_col:
             overlay_particles = st.checkbox(
                 "Overlay Dark Matter Particles", value=False
+            )
+            highlight_clusters = st.checkbox(
+                "Highlight Detected Clusters",
+                value=True,
+                key="highlight_detected_clusters",
             )
         with contrast_col:
             contrast = st.slider(
                 "Glow Contrast", min_value=0.5, max_value=2.5, value=1.0, step=0.1
             )
         st.plotly_chart(
-            _heatmap(snapshot, overlay_particles, contrast, base_zmax),
+            _heatmap(
+                snapshot,
+                overlay_particles,
+                contrast,
+                base_zmax,
+                halos=active_halos if highlight_clusters else None,
+            ),
             key="timeline-density-heatmap",
             use_container_width=True,
             config={"displayModeBar": False},
         )
+        st.subheader("Halo Mass Function (Bottom-Up Assembly)")
+        st.plotly_chart(
+            _halo_mass_function_figure(active_halos, reference_halos),
+            key="timeline-halo-mass-function",
+            use_container_width=True,
+            config={"displayModeBar": False},
+        )
+        st.caption(
+            "Thousands of lightweight clumps merge over cosmic time into rare, "
+            "massive clusters at the right-hand tail."
+        )
+        if st.session_state.get("is_playing"):
+            if snapshot_index < len(snapshots) - 1:
+                delay = {"1×": 0.12, "2×": 0.06, "0.5×": 0.24}[
+                    st.session_state["playback_speed"]
+                ]
+                time.sleep(delay)
+                st.session_state["advance_timeline"] = True
+                st.rerun()
+            st.session_state["is_playing"] = False
+            st.rerun()
 
     with reality_tab:
         cosmology = Cosmology(

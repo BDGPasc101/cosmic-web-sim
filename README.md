@@ -15,6 +15,7 @@ cosmic-web-sim/
 │   ├── initial_conditions.py# Density field and initial particle positions
 │   ├── solver.py            # Cloud-in-Cell mass grid and FFT gravity
 │   ├── simulation.py        # Time integrator and saved snapshots
+│   ├── halos.py             # Periodic 2D cluster finder and halo mass function
 │   └── sdss_data.py         # SDSS loading and galaxy clustering
 ├── tests/                   # Automated tests
 ├── app.py                   # Streamlit web app entry point
@@ -63,8 +64,12 @@ Choose a preset or customize the cosmology and simulation resolution. The
 dashboard caches the evolution and SDSS projection so timeline scrubbing does
 not rerun the simulation. The resolution control selects a 128, 160, or 192
 square mesh with one particle per cell; particle overlays are subsampled for
-browser performance. The SDSS comparison is a 2D projection against a periodic
-simulation, not a full 3D survey analysis.
+browser performance. Tab 1 includes animated timeline playback with speed and
+restart controls, live captions describing each cosmic era, and a periodic
+cluster finder with a live cumulative halo mass function. Detected clusters can
+be highlighted on the density map and compared with a standard ΛCDM present-day
+reference. The SDSS comparison is a 2D projection against a periodic simulation,
+not a full 3D survey analysis.
 
 ## Run tests
 
@@ -75,7 +80,8 @@ python -m pytest
 ```
 
 The tests cover periodic mass conservation, force interpolation, growth of
-structure, SDSS projection and offline loading, and clustering estimators.
+structure, periodic halo finding, SDSS projection and offline loading, and
+clustering estimators.
 
 ## Engine architecture
 
